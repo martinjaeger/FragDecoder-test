@@ -1,74 +1,119 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <time.h>
-#include "FragDecoder.h"
 #include <string.h>
+
+#include "FragDecoder.h"
 
 int8_t flash_write(uint32_t addr, uint8_t *buf, uint32_t len);
 int8_t flash_read(uint32_t addr, uint8_t *buf, uint32_t len);
 
-#define FRAG_NB                 (1907)
 #define FRAG_SIZE               (232)
-#define FRAG_CR                 (FRAG_NB + 10)
-#define FRAG_TOLERENCE          (10 + FRAG_NB * (FRAG_PER + 0.05))
-#define FRAG_PER                (0.2)
 
-uint8_t dec_buf[(FRAG_NB + FRAG_CR) * FRAG_SIZE + 1024*1024];
-uint8_t dec_flash_buf[(FRAG_NB + FRAG_CR) * FRAG_SIZE + 1024*1024];
+uint8_t flash_buf[FRAG_MAX_NB * FRAG_MAX_SIZE];
+int skip_arr[100];
+int skip_num;
 
-int8_t flash_write(uint32_t addr, uint8_t *buf, uint32_t len)
-{
-    memcpy(dec_flash_buf + addr, buf, len);
-}
+FragDecoderStatus_t decoder_status;
+int32_t decoder_process_status;
 
-int8_t flash_read(uint32_t addr, uint8_t *buf, uint32_t len)
-{
-    memcpy(buf, dec_flash_buf + addr, len);
-}
-
-void putbuf(uint8_t *buf, int len)
+/* output similar to Zephyr LOG_HEXDUMP */
+void log_hex(uint8_t *buf, int len)
 {
     int i;
     for (i = 0; i < len; i++) {
-        printf("%02X ", buf[i]);
+        if (i % 8 == 0) {
+            printf(" ");
+        }
+        if (i != 0 && i % 64 == 0) {
+            printf("\n ");
+        }
+        printf("%02x ", buf[i]);
     }
     printf("\n");
 }
 
-FragDecoderStatus_t decoder_status;
-//FragDecoderCallbacks_t decoder_callbacks;
-int32_t decoder_process_status;
+int8_t flash_write(uint32_t addr, uint8_t *buf, uint32_t len)
+{
+	printf("Writing %u bytes to addr 0x%x:\n", len, addr);
 
-int main()
+    log_hex(buf, len);
+
+    memcpy(flash_buf + addr, buf, len);
+}
+
+int8_t flash_read(uint32_t addr, uint8_t *buf, uint32_t len)
+{
+    memcpy(buf, flash_buf + addr, len);
+}
+
+bool skip(int nb)
+{
+    for (int i = 0; i < skip_num; i++) {
+        if (skip_arr[i] == nb) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+int main(int argc, char *argv[])
 {
     int ret, len, nb;
     uint8_t buf[FRAG_SIZE];
 
-    FragDecoderCallbacks_t decoder_callbacks = {
-        .FragDecoderWrite = flash_write,
-        .FragDecoderRead = flash_read,
-    };
+    FragDecoderCallbacks_t decoder_callbacks = { 0 };
 
-    FragDecoderInit(FRAG_NB, FRAG_SIZE, &decoder_callbacks);
+    if (argc < 4) {
+        printf("command-line arguments: <input.bin> <output.bin> <nb_frag> <skipped_frags>\n");
+        return -1;
+    }
 
-    freopen(NULL, "rb", stdin);
-    FILE *outfile = fopen("../../app_update_decoded_fragdecoder.bin", "wb");
+    int nb_frag = atoi(argv[3]);
+
+    for (int i = 0; i < argc - 4 && i < sizeof(skip_arr); i++) {
+        skip_arr[i] = atoi(argv[i + 4]);
+        skip_num++;
+    }
+
+    FragDecoderInit(nb_frag, FRAG_SIZE, &decoder_callbacks);
+    decoder_process_status = FRAG_SESSION_ONGOING;
+
+    /*
+     * Assign callbacks after initialization to prevent the FragDecoder
+     * from writing byte-wise 0xFF to the entire flash. Instead, erase
+     * flash properly with own implementation.
+     */
+    decoder_callbacks.FragDecoderWrite = flash_write;
+    decoder_callbacks.FragDecoderRead = flash_read;
+
+    FILE *infile = fopen(argv[1], "rb");
+    FILE *outfile = fopen(argv[2], "wb");
 
     nb = 0;
     do {
         nb++;
-        len = fread(buf, 1, sizeof(buf), stdin);
-        if (nb % 10 != 0) {
-            // skip each 10th fragment
-            decoder_process_status = FragDecoderProcess(nb, buf);
-            decoder_status = FragDecoderGetStatus();
-            printf("frag %d, process status: %d\n", nb, decoder_process_status);
+        len = fread(buf, 1, sizeof(buf), infile);
+        if (!skip(nb)) {
+            if (decoder_process_status == FRAG_SESSION_ONGOING) {
+                decoder_process_status = FragDecoderProcess(nb, buf);
+                decoder_status = FragDecoderGetStatus();
+                printf("frag %d, process status: %d\n", nb, decoder_process_status);
+            }
+            else if (decoder_process_status >= 0) {
+                printf("All fragments written to flash\n");
+            }
+        }
+        else {
+            printf("skipped frag %d\n", nb);
         }
     } while (len > 0);
 
-    fwrite(dec_flash_buf, 1, sizeof(dec_flash_buf), outfile);
+    fwrite(flash_buf, 1, sizeof(flash_buf), outfile);
 
-    fclose(stdin);
+    fclose(infile);
     fclose(outfile);
 }
 
