@@ -36,11 +36,18 @@ void log_hex(uint8_t *buf, int len)
 
 int8_t flash_write(uint32_t addr, uint8_t *buf, uint32_t len)
 {
+    static bool frag_written[FRAG_MAX_NB];
+    int frag = addr / FRAG_SIZE;
+
 	printf("Writing %u bytes to addr 0x%x:\n", len, addr);
 
     log_hex(buf, len);
 
-    memcpy(flash_buf + addr, buf, len);
+    /* simulate behavior of actual flash, allowing only single write operations */
+    if (!frag_written[frag]) {
+        memcpy(flash_buf + addr, buf, len);
+        frag_written[frag] = true;
+    }
 }
 
 int8_t flash_read(uint32_t addr, uint8_t *buf, uint32_t len)
@@ -80,6 +87,8 @@ int main(int argc, char *argv[])
 
     FragDecoderInit(nb_frag, FRAG_SIZE, &decoder_callbacks);
     decoder_process_status = FRAG_SESSION_ONGOING;
+
+    memset(flash_buf, 0xFF, sizeof(flash_buf));
 
     /*
      * Assign callbacks after initialization to prevent the FragDecoder
